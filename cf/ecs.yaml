@@ -1,0 +1,394 @@
+--- 
+Description: ECS Cluster
+
+Parameters:
+
+  ClusterName:
+    Type: String
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+
+  LogGroupName:
+    Type: String
+    Description: The name of the log group for the ecs instances
+
+  Subnets:
+    Description: Subnets which this load balancer will reside
+    Type: List<String>
+
+  BaseAmi:
+    Type: String
+    Description: The latest ECS ami
+
+  KeyPair:
+    Description: The EC2 key pair name
+    Type: AWS::EC2::KeyPair::KeyName
+
+  InstanceType:
+    Description: The EC2 instance type
+    Type: String
+
+  MinSize:
+    Type: Number
+
+  MaxSize:
+    Type: Number
+
+  DesiredCapacity:
+    Type: Number
+
+Resources:
+
+  SecurityGroupEC2:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: Allows access to instances by group membership
+      VpcId: !Ref VpcId
+      Tags:
+      - Key: Name
+        Value: security-group-ec2
+
+  SecurityGroupIP:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: Allows access to instances by CidrIp
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+      - CidrIp: 172.31.0.0/16
+        IpProtocol: -1
+      - CidrIp: 0.0.0.0/0
+        IpProtocol: TCP
+        FromPort: 22
+        ToPort: 22
+      - CidrIp: 0.0.0.0/0
+        IpProtocol: TCP
+        FromPort: 80
+        ToPort: 80
+      - CidrIp: 0.0.0.0/0
+        IpProtocol: TCP
+        FromPort: 8081
+        ToPort: 8081
+      - CidrIp: 0.0.0.0/0
+        IpProtocol: TCP
+        FromPort: 443
+        ToPort: 443
+      - CidrIp: 0.0.0.0/0
+        IpProtocol: TCP
+        FromPort: 3128
+        ToPort: 3128
+      Tags:
+      - Key: Name
+        Value: security-group-ip
+
+  SecurityGroupEC2Ingress:
+    Type: "AWS::EC2::SecurityGroupIngress"
+    Properties:
+      GroupId: !Ref SecurityGroupEC2
+      SourceSecurityGroupId: !Ref SecurityGroupEC2
+      IpProtocol: -1
+
+  Cluster:
+    Type: "AWS::ECS::Cluster"
+    Properties:
+      ClusterName: !Ref ClusterName
+
+  LogGroup:
+    Type: "AWS::Logs::LogGroup"
+    Properties:
+      LogGroupName: !Ref LogGroupName
+      RetentionInDays: 30
+
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: "/"
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - ec2.amazonaws.com
+            - ecs.amazonaws.com
+            - application-autoscaling.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+      - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceAutoscaleRole
+
+  PolicyEc2:
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: !Sub "policy-${AWS::StackName}-ec2"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Effect: Allow
+          Action:
+          - "ec2:DescribeInstances"
+          Resource:
+          - "*"
+      Roles:
+      - !Ref InstanceRole
+
+  PolicyLogs:
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: !Sub "policy-${AWS::StackName}-logs"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Effect: Allow
+          Action:
+          - "logs:CreateLogGroup"
+          - "logs:CreateLogStream"
+          - "logs:PutLogEvents"
+          - "logs:DescribeLogStreams"
+          Resource:
+          - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:${LogGroupName}*"
+      Roles:
+      - !Ref InstanceRole
+
+  InstanceProfile:
+    Type: "AWS::IAM::InstanceProfile"
+    Properties:
+      Path: /
+      Roles:
+      - !Ref InstanceRole
+      InstanceProfileName: !Sub "${AWS::StackName}"
+
+  LaunchConfiguration:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref InstanceProfile
+      KeyName: !Ref KeyPair
+      ImageId: !Ref BaseAmi
+      SecurityGroups:
+        - !Ref SecurityGroupEC2
+        - !Ref SecurityGroupIP
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum install -y aws-cfn-bootstrap
+          /opt/aws/bin/cfn-init -v --stack ${AWS::StackId} --resource LaunchConfiguration --region ${AWS::Region}
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackId} --resource AutoScalingGroup
+    Metadata:
+      AWS::CloudFormation::Init:
+        configSets:
+          default:
+          - config_cfn
+          - install_logs
+          - config_ecs
+        config_cfn:
+          files:
+            /etc/cfn/cfn-hup.conf:
+              content: !Sub |
+                [main]
+                stack=${AWS::StackId}
+                region=${AWS::Region}
+                verbose=true
+                interval=5
+            /etc/cfn/hooks.d/cfn-auto-reloader.conf:
+              content: !Sub |
+                [cfn-auto-reloader-hook]
+                tiggers=post.update
+                path=Resources.LaunchConfiguration.Metadata.AWS::CloudFormation::Init
+                action=/opt/aws/bin/cfn-init -v --stack ${AWS::StackId} --resource LaunchConfiguration --region ${AWS::Region}
+        install_logs:
+          packages:
+            yum: {
+              awslogs: []
+            }
+          files:
+            /etc/awslogs/awscli.conf:
+              content: !Sub |
+                [plugins]
+                cwlogs = cwlogs
+
+                [default]
+                region = ${AWS::Region}
+            /etc/awslogs/awslogs.conf:
+              content: !Sub |
+                [general]
+                state_file = /var/awslogs/state/agent-state
+                use_gzip_http_content_encoding = true
+
+                [/var/log/cron]
+                file = /var/log/cron
+                log_group_name = ${LogGroupName}
+                log_stream_name = cron-{instance_id}
+                datetime_format = %b %d %H:%M:%S
+
+                [/var/log/docker]
+                file = /var/log/docker
+                log_group_name = ${LogGroupName}
+                log_stream_name = docker-{instance_id}
+                datetime_format = %b %d %H:%M:%S
+
+                [/var/log/ecs/ecs-agent.log]
+                file = /var/log/ecs/ecs-agent.log
+                log_group_name = ${LogGroupName}
+                log_stream_name = ecs-agent-{instance_id}
+                datetime_format = %b %d %H:%M:%S
+
+                [/var/log/ecs/ecs-init.log]
+                file = /var/log/ecs/ecs-init.log
+                log_group_name = ${LogGroupName}
+                log_stream_name = ecs-init-{instance_id}
+                datetime_format = %b %d %H:%M:%S
+
+                [/var/log/audit/audit.log]
+                file = /var/log/audit/audit.log
+                log_group_name = ${LogGroupName}
+                log_stream_name = audit-{instance_id}
+                datetime_format = %b %d %H:%M:%S
+
+                [/var/log/messages]
+                file = /var/log/messages
+                log_group_name = ${LogGroupName}
+                log_stream_name = messages-{instance_id}
+                datetime_format = %b %d %H:%M:%S
+
+                [/var/log/dmesg]
+                file = /var/log/dmesg
+                log_group_name = ${LogGroupName}
+                log_stream_name = dmesg-{instance_id}
+                datetime_format = %b %d %H:%M:%S
+
+                [/var/log/cloud-init.log]
+                file = /var/log/cloud-init.log
+                log_group_name = ${LogGroupName}
+                log_stream_name = cloud-init-{instance_id}
+                datetime_format = %b %d %H:%M:%S
+
+                [/var/log/cloud-init-output.log]
+                file = /var/log/cloud-init-output.log
+                log_group_name = ${LogGroupName}
+                log_stream_name = cloud-init-output-{instance_id}
+                datetime_format = %b %d %H:%M:%S
+
+                [/var/log/cfn-init.log]
+                file = /var/log/cfn-init.log
+                log_group_name = ${LogGroupName}
+                log_stream_name = cfn-init-{instance_id}
+                datetime_format = %b %d %H:%M:%S
+
+                [/var/log/cfn-hup.log]
+                file = /var/log/cfn-hup.log
+                log_group_name = ${LogGroupName}
+                log_stream_name = cfn-hup-{instance_id}
+                datetime_format = %b %d %H:%M:%S
+
+                [/var/log/cfn-wire.log]
+                file = /var/log/cfn-wire.log
+                log_group_name = ${LogGroupName}
+                log_stream_name = cfn-wire-{instance_id}
+                datetime_format = %b %d %H:%M:%S
+          commands:
+            01_create_state_directory:
+              command: |
+                mkdir -p /var/awslogs/state
+                chown -R ec2-user:ec2-user /var/awslogs
+                service awslogs start
+
+        config_ecs:
+          commands:
+            01_add_instance_to_cluster:
+              command: !Sub |
+                #!/bin/bash -xe
+                echo "ECS_CLUSTER=${ClusterName}" > /etc/ecs/ecs.config
+                echo ECS_AVAILABLE_LOGGING_DRIVERS='["json-file","awslogs", "splunk"]' >> /etc/ecs/ecs.config
+                echo "ECS_ENGINE_TASK_CLEANUP_WAIT_DURATION=1h" >> /etc/ecs/ecs.config
+
+        config_metrics:
+          commands:
+            01_run_config_metrics:
+              command: !Sub |
+                cd /home/ec2-user/
+                yum install perl-Switch perl-DateTime perl-Sys-Syslog perl-LWP-Protocol-https unzip install perl-Digest-SHA.x86_64 -y
+                curl http://aws-cloudwatch.s3.amazonaws.com/downloads/CloudWatchMonitoringScripts-1.2.1.zip -O
+                unzip CloudWatchMonitoringScripts-1.2.1.zip
+                rm -f CloudWatchMonitoringScripts-1.2.1.zip
+                crontab -l > cloudwatch
+                echo "*/1 * * * * /home/ec2-user/aws-scripts-mon/mon-put-instance-data.pl --mem-used-incl-cache-buff --mem-util --disk-space-util --disk-path=/ --namespace=${ClusterName} --auto-scaling=only --from-cron" >> cloudwatch
+                crontab cloudwatch
+                rm cloudwatch
+
+  AutoScalingGroup:
+      Type: AWS::AutoScaling::AutoScalingGroup
+      Properties:
+        VPCZoneIdentifier: !Ref Subnets
+        LaunchConfigurationName: !Ref LaunchConfiguration
+        MinSize: !Ref MinSize
+        MaxSize: !Ref MaxSize
+        DesiredCapacity: !Ref DesiredCapacity
+        MetricsCollection:
+        - Granularity: '1Minute'
+        Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}"
+          PropagateAtLaunch: true
+      UpdatePolicy:
+        AutoScalingRollingUpdate:
+          MinInstancesInService: 1
+          MaxBatchSize: 2
+          PauseTime: PT5M
+
+Outputs:
+
+  ClusterName:
+    Value: !Ref Cluster 
+    Export:
+      Name: !Sub "${AWS::StackName}::ClusterName"
+
+  SecurityGroupEC2:
+    Value: !Ref SecurityGroupEC2
+    Export:
+      Name: !Sub "${AWS::StackName}::SecurityGroupEC2"
+
+  SecurityGroupIP:
+    Value: !Ref SecurityGroupIP
+    Export:
+      Name: !Sub "${AWS::StackName}::SecurityGroupIP"
+
+  LogGroupName:
+    Value: !Ref LogGroup
+    Export:
+      Name: !Sub "${AWS::StackName}::LogGroupName"
+
+  LogGroupArn:
+    Value: !GetAtt LogGroup.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}::LogGroupArn"
+
+  InstanceProfile:
+    Value: !Ref InstanceProfile
+    Export:
+      Name: !Sub "${AWS::StackName}::InstanceProfile"
+
+  InstanceRoleArn:
+    Value: !GetAtt InstanceRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}::InstanceRoleArn"
+
+  AutoScalingGroup:
+    Value: !Ref AutoScalingGroup
+    Export:
+      Name: !Sub "${AWS::StackName}::AutoScalingGroup"
+
+  PolicyEc2:
+    Value: !Ref PolicyEc2
+    Export:
+      Name: !Sub "${AWS::StackName}::PolicyEc2"
+
+  PolicyLogs:
+    Value: !Ref PolicyLogs
+    Export:
+      Name: !Sub "${AWS::StackName}::PolicyLogs"
+
+  LaunchConfiguration:
+    Value: !Ref LaunchConfiguration
+    Export:
+      Name: !Sub "${AWS::StackName}::LaunchConfiguration"

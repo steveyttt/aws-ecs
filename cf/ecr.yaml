@@ -1,0 +1,70 @@
+---
+Description: Docker registry for images
+
+Resources:
+
+  NginxRepository:
+    Type: AWS::ECR::Repository
+    Properties: 
+      RepositoryName: "nginx"
+      RepositoryPolicyText: 
+        Version: "2012-10-17"
+        Statement: 
+          -
+            Sid: AllowPushPull
+            Effect: Allow
+            Principal:
+              AWS: 
+                - "arn:aws:iam::366416047919:role/*"
+            Action:
+              - "ecr:GetDownloadUrlForLayer"
+              - "ecr:BatchGetImage"
+              - "ecr:BatchCheckLayerAvailability"
+              - "ecr:PutImage"
+              - "ecr:InitiateLayerUpload"
+              - "ecr:UploadLayerPart"
+              - "ecr:CompleteLayerUpload"
+
+  SquidRepository:
+    Type: AWS::ECR::Repository
+    Properties: 
+      RepositoryName: "squid"
+      RepositoryPolicyText: 
+        Version: "2012-10-17"
+        Statement: 
+          -
+            Sid: AllowPushPull
+            Effect: Allow
+            Principal:
+              AWS: 
+                - "arn:aws:iam::366416047919:role/*"
+            Action:
+              - "ecr:GetDownloadUrlForLayer"
+              - "ecr:BatchGetImage"
+              - "ecr:BatchCheckLayerAvailability"
+              - "ecr:PutImage"
+              - "ecr:InitiateLayerUpload"
+              - "ecr:UploadLayerPart"
+              - "ecr:CompleteLayerUpload"
+
+Outputs:
+
+  NginxRepository:
+    Value: !Ref NginxRepository 
+    Export:
+      Name: !Sub "${AWS::StackName}::NginxRepository"
+
+  NginxRepositoryArn:
+    Value: !GetAtt NginxRepository.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}::NginxRepositoryArn"
+
+  SquidRepository:
+    Value: !Ref SquidRepository 
+    Export:
+      Name: !Sub "${AWS::StackName}::SquidRepository"
+
+  SquidRepositoryArn:
+    Value: !GetAtt SquidRepository.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}::SquidRepositoryArn"

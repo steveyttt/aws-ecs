@@ -1,0 +1,279 @@
+---
+Description: Service to deploy Squid container onto ECS using NLB
+
+Parameters:
+
+  LogGroupName:
+    Type: String
+    Description: The name of the log group for the ecs containers
+
+  RetentionInDays:
+    Type: String
+    Default: "30"
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  
+  TaskDefFamily:
+    Type: String
+    Description: logical human name of container task def
+
+  ContainerDefinitionName:
+    Type: String
+    Description: logical human name of running container task def
+
+  TaskDefImage:
+    Type: String
+    Description: Image to use from ECR for your running container
+
+  ContainerPort:
+    Type: Number
+    Description: Port for your running container
+
+  Memory:
+    Type: Number
+    Description: Memory to assign your container
+
+  LoadBalancerType:
+    Type: String
+    Description: type of load balancer to use
+    AllowedValues:
+      - application
+      - network
+
+  TargetGroupProtocol:
+    Type: String
+    Description: protocol for traffic between target group and load balancer
+
+  TargetGroupPort:
+    Type: String
+    Description: protocol for traffic between target group and load balancer
+
+  TargetGroupHealthCheckProtocol:
+    Type: String
+    Description: protocol for traffic between target group and load balancer
+
+  Listenerport:
+    Type: String
+    Description: port for the container to listen on
+
+  ListenerProtocol:
+    Type: String
+    Description: protocol for listener
+
+  ServiceName:
+    Type: String
+    Description: Name of ECS Service
+
+  ServiceDesiredCount:
+    Type: Number
+    Description: Number of tasks running in service
+
+  EcsClusterName:
+    Type: String
+    Description: Name of ECS cluster which will host your task Def
+
+  Subnets:
+    Description: Subnets which this load balancer will reside
+    Type: List<String>
+
+  Scheme:
+    Description: Type of load balancer
+    Type: String
+
+Resources:
+
+  LogGroup:
+    Type: "AWS::Logs::LogGroup"
+    Properties:
+      LogGroupName: !Ref LogGroupName
+      RetentionInDays: !Ref RetentionInDays
+
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: "/"
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - ecs-tasks.amazonaws.com
+          Action:
+          - sts:AssumeRole
+
+  PolicyLogs:
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: !Sub "policy-${AWS::StackName}-logs"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Effect: Allow
+          Action:
+          - "logs:CreateLogGroup"
+          - "logs:CreateLogStream"
+          - "logs:PutLogEvents"
+          - "logs:DescribeLogStreams"
+          Resource:
+          - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:${LogGroupName}*"
+      Roles:
+      - !Ref TaskRole
+
+  PolicyLaunch:
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: !Sub "policy-${AWS::StackName}-ec2launch"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Effect: Allow
+          Action:
+          - ec2:Describe*
+          - ec2:StartInstances
+          - ec2:StopInstances
+          - ec2:TerminateInstances
+          - ec2:RebootInstances
+          - ec2:RunInstances
+          - ec2:ModifyInstanceAttribute
+          - ec2:*Tags
+          - ec2:RequestSpotInstances
+          - ec2:CancelSpotInstanceRequests
+          - iam:ListInstanceProfiles
+          Resource: "*"
+      Roles:
+      - !Ref TaskRole
+
+  ServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: "/"
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - ecs.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceRole
+
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Type: !Ref LoadBalancerType
+      Scheme: !Ref Scheme
+      Subnets: !Ref Subnets
+
+  TargetGroup:
+    Type: "AWS::ElasticLoadBalancingV2::TargetGroup"
+    DependsOn: LoadBalancer
+    Properties:
+      Protocol: !Ref TargetGroupProtocol
+      VpcId: !Ref VpcId
+      Port: !Ref TargetGroupPort
+      HealthCheckIntervalSeconds: 30
+      HealthCheckProtocol: !Ref TargetGroupProtocol
+      HealthCheckTimeoutSeconds: 10
+      HealthyThresholdCount: 3
+      UnhealthyThresholdCount: 3
+
+  Listener:
+    Type: "AWS::ElasticLoadBalancingV2::Listener"
+    DependsOn: LoadBalancer
+    Properties:
+      DefaultActions:
+      - TargetGroupArn: !Ref TargetGroup
+        Type: forward
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: !Ref Listenerport
+      Protocol: !Ref ListenerProtocol
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      TaskRoleArn: !Ref TaskRole
+      Family: !Ref TaskDefFamily
+      NetworkMode: host
+      ContainerDefinitions:
+      - Name: !Ref ContainerDefinitionName
+        Image: !Ref TaskDefImage
+        PortMappings:
+        - ContainerPort: !Ref ContainerPort
+        Memory: !Ref Memory
+        LogConfiguration:
+          LogDriver: awslogs
+          Options:
+            awslogs-group: !Ref LogGroup
+            awslogs-region: !Ref AWS::Region
+
+  Service:
+    Type: "AWS::ECS::Service"
+    Properties:
+      ServiceName: !Ref ServiceName
+      Cluster: !Ref EcsClusterName
+      DesiredCount: !Ref ServiceDesiredCount
+      TaskDefinition: !Ref TaskDefinition
+      Role: !Ref ServiceRole
+      LoadBalancers:
+      - ContainerName: !Ref ContainerDefinitionName
+        ContainerPort: !Ref ContainerPort
+        TargetGroupArn: !Ref TargetGroup
+
+Outputs:
+
+  LogGroup:
+    Value: !Ref LogGroup
+    Export:
+      Name: !Sub "${AWS::StackName}::LogGroup"
+
+  TaskRole:
+    Value: !Ref TaskRole
+    Export:
+      Name: !Sub "${AWS::StackName}::TaskRole"
+
+  PolicyLogs:
+    Value: !Ref PolicyLogs
+    Export:
+      Name: !Sub "${AWS::StackName}::PolicyLogs"
+
+  LogGroupArn:
+    Value: !GetAtt LogGroup.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}::LogGroupArn"
+
+  TaskDefinition:
+    Value: !Ref TaskDefinition
+    Export:
+      Name: !Sub "${AWS::StackName}::TaskDefinition"
+
+  PolicyLaunch:
+    Value: !Ref PolicyLaunch
+    Export:
+        Name: !Sub "${AWS::StackName}::PolicyLaunch"
+
+  ServiceRole:
+    Value: !Ref ServiceRole
+    Export:
+        Name: !Sub "${AWS::StackName}::ServiceRole"
+
+  Service:
+    Value: !Ref Service
+    Export:
+        Name: !Sub "${AWS::StackName}::Service"
+
+  LoadBalancer:
+    Value: !Ref LoadBalancer
+    Export:
+        Name: !Sub "${AWS::StackName}::LoadBalancer"
+
+  TargetGroup:
+    Value: !Ref TargetGroup
+    Export:
+        Name: !Sub "${AWS::StackName}::TargetGroup"
+
+  Listener:
+    Value: !Ref Listener
+    Export:
+        Name: !Sub "${AWS::StackName}::Listener"
