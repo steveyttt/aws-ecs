@@ -7,10 +7,10 @@ docker run -p 3128:3128 squid
 curl www.google.com -x http://localhost:3128
 
 #Tag the image with the current version and the latest tag
-docker tag squid 366416047919.dkr.ecr.ap-southeast-2.amazonaws.com/squid:latest
+docker tag squid {account-id}.dkr.ecr.ap-southeast-2.amazonaws.com/squid:latest
 
 #Retrieve the docker login command with authentication from AWS, and then execute
 $(aws ecr get-login --region ap-southeast-2 --no-include-email)
 
 #Push the imnages to the remote repository
-docker push 366416047919.dkr.ecr.ap-southeast-2.amazonaws.com/squid:latest
+docker push {account-id}.dkr.ecr.ap-southeast-2.amazonaws.com/squid:latest
